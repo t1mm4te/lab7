@@ -1,0 +1,501 @@
+--- # headless service !!important for sts!!
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana-svc # corresponding with serviceName within sts
+  namespace: monitoring
+spec:
+  selector:
+    app: grafana
+  clusterIP: None # headless service
+  publishNotReadyAddresses: true
+  ports:
+    - name: api-port
+      port: 3000
+      targetPort: api
+--- # for grafana ui access
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana-ui-nodeport-svc
+  namespace: monitoring
+spec:
+  selector:
+    app: grafana
+  type: NodePort
+  ports:
+    - protocol: TCP
+      port: 3000
+      nodePort: 32060
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: grafana
+  namespace: monitoring
+  labels:
+    app: grafana-sts
+spec:
+  serviceName: grafana-svc # corresponding with headless svc name
+  podManagementPolicy: Parallel
+  updateStrategy:
+    type: OnDelete
+  selector:
+    matchLabels:
+      app: grafana
+  replicas: 1
+  revisionHistoryLimit: 5
+  template:
+    metadata:
+      labels:
+        app: grafana
+    spec:
+      # automountServiceAccountToken: false
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname # set label key from k get nodes --show-labels
+                    operator: In
+                    values:
+                      - 'worker1-kvm' # set label value from k get nods --show-labels
+      securityContext: # sec for the pod
+        fsGroup: 472
+        supplementalGroups:
+          - 0
+      containers:
+        - name: grafana
+          image: grafana/grafana:11.6.1
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ ALL ]
+          # ports can be omitted
+          ports:
+            - name: api
+              containerPort: 3000
+              protocol: TCP
+          env:
+            - name: TZ
+              value: Europe/Moscow
+
+            - name: NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+
+            # change for alert link
+            - name: GF_SERVER_ROOT_URL
+              value: http://$(NODE_IP):32060
+            
+            # - name: GF_SERVER_HTTP_PORT
+            #   value: "32060"
+
+            - name: GF_USERS_VIEWERS_CAN_EDIT
+              value: "true"
+          livenessProbe:
+            failureThreshold: 3
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            successThreshold: 1
+            tcpSocket:
+              port: 3000
+            timeoutSeconds: 1
+          readinessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /robots.txt
+              port: 3000
+              scheme: HTTP
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            successThreshold: 1
+            timeoutSeconds: 2
+          resources:
+            requests:
+              cpu: 512m
+              memory: 384Mi
+            limits:
+              cpu: 512m
+              memory: 384Mi
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/grafana
+            - name: grafana-provisioning-configs
+              mountPath: /etc/grafana/provisioning/alerting/alerts.yml
+              subPath: alerts.yml
+            - name: grafana-provisioning-configs
+              mountPath: /etc/grafana/provisioning/dashboards/dashboards.yml
+              subPath: dashboards.yml
+            - name: grafana-provisioning-configs
+              mountPath: /etc/grafana/provisioning/datasources/datasources.yml
+              subPath: datasources.yml
+      volumes:
+        - name: grafana-provisioning-configs
+          configMap:
+            name: grafana-provisioning-configs
+            items:
+              - key: alerts.yml
+                path: alerts.yml
+              - key: dashboards.yml
+                path: dashboards.yml
+              - key: datasources.yml
+                path: datasources.yml
+            defaultMode: 0644
+  volumeClaimTemplates: # automatically creates PVC for each instance of the STS. k get pvc to check
+    - metadata:
+        name: data # prefix of pv (claimRef.name)
+      spec:
+        storageClassName: local-storage
+        accessModes: [ ReadWriteOnce ]
+        resources:
+          requests:
+            storage: 256Mi
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-provisioning-configs
+  namespace: monitoring
+data:
+  alerts.yml: |
+    # config file version
+    apiVersion: 1
+
+    # List of contact points
+    contactPoints:
+        - orgId: 1
+          name: telegram-alerts
+          receivers:
+            - uid: telegram_alerts
+              type: telegram
+              settings:
+                # change it to yours
+                bottoken: 7677370287:AAGQJZR8MZPCSCDwAYUxxT3OEdbhF0n8b5g
+
+                # change it to yours
+                chatid: "-1002562248928"
+
+                disable_notification: false
+                disable_web_page_preview: false
+                protect_content: false
+              disableResolveMessage: false
+
+    # List of rule groups to import or update
+    groups:
+      # <int> organization ID, default = 1
+      - orgId: 1
+        # <string, required> name of the rule group
+        name: eval
+        # <string, required> name of the folder the rule group will be stored in
+        folder: alerts
+        # <duration, required> interval that the rule group should evaluated at
+        interval: 10s
+        # <list, required> list of rules that are part of the rule group
+        rules:
+          # <string, required> unique identifier for the rule. Should not exceed 40 symbols. Only letters, numbers, - (hyphen), and _ (underscore) allowed.
+          - uid: bek754iw4b1fkb
+            # <string, required> title of the rule that will be displayed in the UI
+            title: high CPU usage all nodes
+            # <string, required> which query should be used for the condition
+            condition: C
+            # <list, required> list of query objects that should be executed on each
+            #                  evaluation - should be obtained through the API
+            data:
+              - refId: A
+                relativeTimeRange:
+                  from: 600
+                  to: 0
+                datasourceUid: prometheus_datasource
+                model:
+                  editorMode: code
+                  exemplar: false
+                  expr: 100 * (1 - avg(rate(node_cpu_seconds_total{mode="idle"}[$__rate_interval])))
+                  instant: false
+                  intervalMs: 1000
+                  legendFormat: __auto
+                  maxDataPoints: 43200
+                  range: true
+                  refId: A
+              - refId: B
+                queryType: expression
+                datasourceUid: __expr__
+                model:
+                  conditions:
+                      - evaluator:
+                          params:
+                              - 0
+                              - 0
+                          type: gt
+                        operator:
+                          type: and
+                        query:
+                          params: []
+                        reducer:
+                          params: []
+                          type: avg
+                        type: query
+                  datasource:
+                      name: Expression
+                      type: __expr__
+                      uid: __expr__
+                  expression: A
+                  intervalMs: 1000
+                  maxDataPoints: 43200
+                  reducer: last
+                  refId: B
+                  type: reduce
+              - refId: C
+                datasourceUid: __expr__
+                model:
+                  conditions:
+                      - evaluator:
+                          params:
+                              - 70
+                          type: gt
+                        operator:
+                          type: and
+                        query:
+                          params:
+                              - C
+                        reducer:
+                          params: []
+                          type: last
+                        type: query
+                  datasource:
+                      type: __expr__
+                      uid: __expr__
+                  expression: B
+                  intervalMs: 1000
+                  maxDataPoints: 43200
+                  refId: C
+                  type: threshold
+            # <string> the state the alert rule will have when no data is returned
+            #          possible values: "NoData", "Alerting", "OK", default = NoData
+            noDataState: NoData
+            # <string> the state the alert rule will have when the query execution
+            #          failed - possible values: "Error", "Alerting", "OK"
+            #          default = Alerting
+            execErrState: Error
+            isPaused: false
+            notification_settings:
+              # linked with contact point name
+              receiver: telegram-alerts
+              group_wait: 10s
+              group_interval: 15s
+              repeat_interval: 30s
+
+            # <string> UID of a dashboard that the alert rule should be linked to
+            # dashboardUid: my_dashboard
+
+            # <int> ID of the panel that the alert rule should be linked to
+            # panelId: 123
+
+            # <map<string, string>> a map of strings to pass around any data
+            # annotations:
+            #   some_key: devops_course
+
+            # <map<string, string> a map of strings that can be used to filter and
+            #                      route alerts
+            # labels:
+            #   team: devops_team_1
+          - uid: fek77cd21lddse
+            title: high DISK usage all nodes
+            condition: C
+            data:
+              - refId: A
+                relativeTimeRange:
+                  from: 600
+                  to: 0
+                datasourceUid: prometheus_datasource
+                model:
+                  editorMode: code
+                  expr: node_filesystem_avail_bytes{device="/dev/vda2",job="node-exporter",fstype="ext4"} / 1024^3
+                  instant: true
+                  intervalMs: 1000
+                  legendFormat: __auto
+                  maxDataPoints: 43200
+                  range: false
+                  refId: A
+              - refId: C
+                datasourceUid: __expr__
+                model:
+                  conditions:
+                      - evaluator:
+                          params:
+                              - 25
+                          type: lt
+                        operator:
+                          type: and
+                        query:
+                          params:
+                              - C
+                        reducer:
+                          params: []
+                          type: last
+                        type: query
+                  datasource:
+                      type: __expr__
+                      uid: __expr__
+                  expression: A
+                  intervalMs: 1000
+                  maxDataPoints: 43200
+                  refId: C
+                  type: threshold
+            noDataState: NoData
+            execErrState: Error
+            isPaused: false
+            notification_settings:
+              receiver: telegram-alerts
+              group_wait: 10s
+              group_interval: 15s
+              repeat_interval: 30s
+
+          - uid: cek78n1t1i8e8e
+            title: high RAM usage all nodes
+            condition: B
+            data:
+              - refId: A
+                relativeTimeRange:
+                  from: 600
+                  to: 0
+                datasourceUid: prometheus_datasource
+                model:
+                  datasource:
+                      type: prometheus
+                      uid: prometheus_datasource
+                  editorMode: code
+                  expr: (node_memory_MemTotal_bytes{job="node-exporter"} - node_memory_MemAvailable_bytes{job="node-exporter"}) / node_memory_MemTotal_bytes * 100
+                  instant: true
+                  intervalMs: 1000
+                  legendFormat: __auto
+                  maxDataPoints: 43200
+                  range: false
+                  refId: A
+              - refId: B
+                datasourceUid: __expr__
+                model:
+                  conditions:
+                      - evaluator:
+                          params:
+                              - 50
+                              - 0
+                          type: gt
+                        operator:
+                          type: and
+                        query:
+                          params: []
+                        reducer:
+                          params: []
+                          type: avg
+                        type: query
+                  datasource:
+                      name: Expression
+                      type: __expr__
+                      uid: __expr__
+                  expression: A
+                  intervalMs: 1000
+                  maxDataPoints: 43200
+                  refId: B
+                  type: threshold
+            noDataState: NoData
+            execErrState: Error
+            isPaused: false
+            notification_settings:
+              receiver: telegram-alerts
+              group_wait: 10s
+              group_interval: 15s
+              repeat_interval: 30s
+
+          - uid: bek7hmat2nxmoa
+            title: pod restarts
+            condition: A
+            data:
+              - refId: A
+                relativeTimeRange:
+                  from: 600
+                  to: 0
+                datasourceUid: prometheus_datasource
+                model:
+                  datasource:
+                      type: prometheus
+                      uid: prometheus_datasource
+                  disableTextWrap: false
+                  editorMode: code
+                  exemplar: false
+                  expr: increase(kube_pod_container_status_restarts_total{namespace="echo-server", job="kube-state-metrics"}[30s])
+                  format: table
+                  fullMetaSearch: false
+                  includeNullMetadata: true
+                  instant: true
+                  intervalMs: 1000
+                  legendFormat: __auto
+                  maxDataPoints: 43200
+                  range: false
+                  refId: A
+                  useBackend: false
+              - refId: B
+                datasourceUid: __expr__
+                model:
+                  conditions:
+                      - evaluator:
+                          params:
+                              - 1
+                              - 0
+                          type: gt
+                        operator:
+                          type: and
+                        query:
+                          params: []
+                        reducer:
+                          params: []
+                          type: avg
+                        type: query
+                  datasource:
+                      name: Expression
+                      type: __expr__
+                      uid: __expr__
+                  expression: A
+                  intervalMs: 1000
+                  maxDataPoints: 43200
+                  refId: B
+                  type: threshold
+            noDataState: OK
+            execErrState: Alerting
+            isPaused: false
+            notification_settings:
+              receiver: telegram-alerts
+              group_wait: 10s
+              group_interval: 15s
+              repeat_interval: 30s
+
+  datasources.yml: |
+    apiVersion: 1
+
+    datasources:
+      - name: prometheus
+        type: prometheus
+        uid: prometheus_datasource
+        url: http://prometheus-0.prometheus-svc:9090
+        jsonData:
+          timeInterval: 60s
+          # exemplarTraceIdDestinations:
+          #   - name: trace_id
+          #     datasourceUid: tempo
+          #     urlDisplayLabel: "Trace: $${__value.raw}"
+
+  dashboards.yml: |
+    apiVersion: 1
+
+    providers:
+      - name: "echo-server-pods"
+        folder: Services # The folder where to place the dashboards
+        type: file
+        editable: true
+        disableDeletion: false
+        updateIntervalSeconds: 5
+        options:
+          path: /var/lib/grafana/dashboards/

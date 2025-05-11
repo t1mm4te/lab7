@@ -1,0 +1,287 @@
+--- # create sa for prometheus
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prometheus
+  namespace: monitoring
+--- # create new clusterRole for prometheus
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: prometheus
+rules:
+  - apiGroups: [""]
+    resources:
+      - nodes
+      - nodes/proxy
+      - nodes/metrics
+      - namespaces
+      - services
+      - endpoints
+      - pods
+    verbs: [ "get", "list", "watch" ]
+  - nonResourceURLs: [ "/metrics" ]
+    verbs: [ "get" ]
+--- # bind sa and clusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: prometheus
+  namespace: monitoring
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: prometheus
+subjects:
+  - kind: ServiceAccount
+    name: prometheus
+    namespace: monitoring
+--- # headless service !!important for sts!!
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus-svc # corresponding with serviceName within sts
+  namespace: monitoring
+spec:
+  selector:
+    app: prometheus
+  clusterIP: None # headless service
+  publishNotReadyAddresses: true
+  ports:
+    - name: api-port
+      port: 9090
+      targetPort: api
+--- # for prometheus ui access
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus-ui-nodeport-svc
+  namespace: monitoring
+spec:
+  selector:
+    app: prometheus
+  type: NodePort
+  ports:
+    - protocol: TCP
+      port: 9090
+      nodePort: 32050
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: prometheus
+  namespace: monitoring
+  labels:
+    app: prometheus-sts
+spec:
+  serviceName: prometheus-svc # corresponding with headless svc name
+  podManagementPolicy: Parallel
+  updateStrategy:
+    type: OnDelete
+  selector:
+    matchLabels:
+      app: prometheus
+  replicas: 1
+  revisionHistoryLimit: 5
+  template:
+    metadata:
+      labels:
+        app: prometheus
+    spec:
+      serviceAccountName: prometheus # assign a serviceAccount
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname # указываем ключ лейбла из nodes
+                    operator: In
+                    values:
+                      - 'worker1-kvm' # указываем значение hostname из nodes для привязки
+      securityContext: # для пода
+        runAsUser:  100
+        runAsGroup: 1000
+        fsGroup:    1000
+        sysctls:    []
+      containers:
+        - name: prometheus
+          image: prom/prometheus:v3.3.0
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ ALL ]
+          args:
+            - "--config.file=/etc/prometheus/prometheus.yaml"
+            - "--storage.tsdb.path=/mnt/prometheus_data"
+            - "--web.listen-address=:9090"
+          # ports can be omitted
+          ports:
+            - name: api
+              containerPort: 9090
+              protocol: TCP
+          env:
+            - name: TZ
+              value: Europe/Moscow
+          resources:
+            requests:
+              cpu: 512m
+              memory: 384Mi
+            limits:
+              cpu: 512m
+              memory: 384Mi
+          volumeMounts:
+            - name: data
+              mountPath: /mnt/prometheus_data
+            - name: config
+              mountPath: /etc/prometheus
+      volumes:
+        - name: config
+          configMap:
+            name: prometheus-cm
+            items:
+              - key: prometheus.yaml
+                path: prometheus.yaml
+            defaultMode: 0777
+  volumeClaimTemplates: # automatically creates PVC for each instance of the STS. k get pvc to check
+    - metadata:
+        name: data # prefix of pv (claimRef.name)
+      spec:
+        storageClassName: local-storage
+        accessModes: [ ReadWriteOnce ]
+        resources:
+          requests:
+            storage: 256Mi
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-cm
+  namespace: monitoring
+data:
+  prometheus.yaml: |
+    global:
+      scrape_interval: 5s
+      evaluation_interval: 5s
+
+    scrape_configs:
+      - job_name: 'kubernetes-nodes'
+        kubernetes_sd_configs:
+          - role: node
+        scheme: https
+        bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        tls_config:
+          insecure_skip_verify: true
+        # metrics_path: /metrics # Explicitly specifying the path to metrics (/metrcics by default). Can be omitted
+        relabel_configs:
+          - action: labelmap
+            regex: __meta_kubernetes_node_label_(.+)
+
+      - job_name: 'kube-state-metrics'
+        kubernetes_sd_configs:
+          - role: pod
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
+            action: keep
+            regex: kube-state-metrics-shard
+          - source_labels: [__meta_kubernetes_pod_container_port_number]
+            action: keep
+            regex: '8080'
+
+      - job_name: 'node-exporter'
+        kubernetes_sd_configs:
+          - role: pod
+        scheme: https
+        bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        tls_config:
+          insecure_skip_verify: true
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
+            action: keep
+            regex: node-exporter
+          - source_labels: [__meta_kubernetes_pod_container_port_number]
+            action: keep
+            regex: '9100'
+
+      # - job_name: 'cadvisor'
+      #   static_configs:
+      #     - targets: [
+      #         "192.168.99.100:9105",
+      #         "192.168.99.101:9105",
+      #         "192.168.99.102:9105",
+      #       ]
+      #   metrics_path: /metrics
+
+      # meta-label k8s sd __meta_kubernetes_pod_label_<key_label>
+      # ex. __meta_kubernetes_pod_label_app, __meta_kubernetes_pod_label_name
+      - job_name: 'cadvisor'
+        kubernetes_sd_configs:
+          - role: pod
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
+            action: keep
+            regex: cadvisor
+          - source_labels: [__meta_kubernetes_pod_container_port_number]
+            action: keep
+            regex: '8080'  # Keep only the port 8080
+
+      # - job_name: 'vault'
+      #   kubernetes_sd_configs:
+      #     - role: endpoints
+      #   scheme: https
+      #   bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+      #   tls_config:
+      #     insecure_skip_verify: true
+      #   relabel_configs:
+      #     - source_labels: [__meta_kubernetes_namespace]
+      #       action: keep
+      #       regex: vault  # Change to your namespace
+      #     - source_labels: [__meta_kubernetes_pod_name]
+      #       action: keep
+      #       regex: vault-0  # Change to your pod name
+
+      # - job_name: 'my-microservices'
+      #   kubernetes_sd_configs:
+      #     - role: endpoints
+      #   scheme: https
+      #   bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+      #   tls_config:
+      #     insecure_skip_verify: true
+      #   relabel_configs:
+      #     - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+      #       action: keep
+      #       regex: true
+
+      # - job_name: 'kubernetes-pods'
+      #   kubernetes_sd_configs:
+      #     - role: pod
+      #   relabel_configs:
+      #     # Example relabel to scrape only pods that have
+      #     # "example.io/should_be_scraped = true" annotation.
+      #     #  - source_labels: [__meta_kubernetes_pod_annotation_example_io_should_be_scraped]
+      #     #    action: keep
+      #     #    regex: true
+      #     #
+      #     # Example relabel to customize metric path based on pod
+      #     # "example.io/metric_path = <metric path>" annotation.
+      #     #  - source_labels: [__meta_kubernetes_pod_annotation_example_io_metric_path]
+      #     #    action: replace
+      #     #    target_label: __metrics_path__
+      #     #    regex: (.+)
+      #     #
+      #     # Example relabel to scrape only single, desired port for the pod
+      #     # based on pod "example.io/scrape_port = <port>" annotation.
+      #     #  - source_labels: [__address__, __meta_kubernetes_pod_annotation_example_io_scrape_port]
+      #     #    action: replace
+      #     #    regex: ([^:]+)(?::\d+)?;(\d+)
+      #     #    replacement: $1:$2
+      #     #    target_label: __address__
+      #     - action: labelmap
+      #       regex: __meta_kubernetes_pod_label_(.+)
+      #     - source_labels: [__meta_kubernetes_namespace]
+      #       action: replace
+      #       target_label: namespace
+      #     - source_labels: [__meta_kubernetes_pod_name]
+      #       action: replace
+      #       target_label: pod
