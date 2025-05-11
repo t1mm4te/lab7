@@ -97,7 +97,7 @@ spec:
                   - key: kubernetes.io/hostname # указываем ключ лейбла из nodes
                     operator: In
                     values:
-                      - 'worker1-kvm' # указываем значение hostname из nodes для привязки
+                      - 'dev-worker1-debian' # указываем значение hostname из nodes для привязки
       securityContext: # для пода
         runAsUser:  100
         runAsGroup: 1000

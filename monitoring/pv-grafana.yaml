@@ -29,4 +29,4 @@ spec:
             - key: kubernetes.io/hostname
               operator: In
               values:
-                - 'worker1-kvm' # specify your node hostname
+                - 'dev-worker1-debian' # specify your node hostname

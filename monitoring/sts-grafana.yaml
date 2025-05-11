@@ -59,7 +59,7 @@ spec:
                   - key: kubernetes.io/hostname # set label key from k get nodes --show-labels
                     operator: In
                     values:
-                      - 'worker1-kvm' # set label value from k get nods --show-labels
+                      - 'dev-worker1-debian' # set label value from k get nods --show-labels
       securityContext: # sec for the pod
         fsGroup: 472
         supplementalGroups:
