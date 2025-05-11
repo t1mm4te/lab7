@@ -162,7 +162,7 @@ metadata:
 data:
   prometheus.yaml: |
     global:
-      scrape_interval: 5s
+      scrape_interval: 15s
       evaluation_interval: 5s
 
     scrape_configs:

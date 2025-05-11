@@ -100,6 +100,9 @@ spec:
 
             - name: GF_USERS_VIEWERS_CAN_EDIT
               value: "true"
+            
+            - name: GF_SERVER_HTTP_PORT        # <-- Эта переменная указывает Grafana слушать порт 8000
+              value: "8000"
           livenessProbe:
             failureThreshold: 3
             initialDelaySeconds: 30
