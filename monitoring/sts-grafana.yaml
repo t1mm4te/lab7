@@ -11,7 +11,7 @@ spec:
   publishNotReadyAddresses: true
   ports:
     - name: api-port
-      port: 3000
+      port: 8000
       targetPort: api
 --- # for grafana ui access
 apiVersion: v1
@@ -25,7 +25,7 @@ spec:
   type: NodePort
   ports:
     - protocol: TCP
-      port: 3000
+      port: 8000
       nodePort: 32060
 ---
 apiVersion: apps/v1
@@ -50,6 +50,10 @@ spec:
       labels:
         app: grafana
     spec:
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
       # automountServiceAccountToken: false
       affinity:
         nodeAffinity:
@@ -76,7 +80,7 @@ spec:
           # ports can be omitted
           ports:
             - name: api
-              containerPort: 3000
+              containerPort: 8000
               protocol: TCP
           env:
             - name: TZ
@@ -102,13 +106,13 @@ spec:
             periodSeconds: 10
             successThreshold: 1
             tcpSocket:
-              port: 3000
+              port: 8000
             timeoutSeconds: 1
           readinessProbe:
             failureThreshold: 3
             httpGet:
-              path: /robots.txt
-              port: 3000
+              path: /health
+              port: 8000
               scheme: HTTP
             initialDelaySeconds: 10
             periodSeconds: 30
@@ -174,10 +178,10 @@ data:
               type: telegram
               settings:
                 # change it to yours
-                bottoken: 7677370287:AAGQJZR8MZPCSCDwAYUxxT3OEdbhF0n8b5g
+                bottoken: 8080189686:AAG4uVjtOqsUghqAu3c6Yq8W_If-IEp79i0
 
                 # change it to yours
-                chatid: "-1002562248928"
+                chatid: "-1002658420800"
 
                 disable_notification: false
                 disable_web_page_preview: false
